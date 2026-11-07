@@ -2,7 +2,7 @@
 
 ## Topic
 
-This project is a small Feature / Training / Inference (FTI) machine learning system for the MLOps course. It forecasts wind gusts at the MeteoSwiss station Bern / Zollikofen. It uses Hopsworks (project `gust_prediction`) as Feature Store and Model Registry and runs locally.
+This project is a small Feature / Training / Inference (FTI) machine learning system for the MLOps course. It forecasts wind gusts at the MeteoSwiss station Bern / Zollikofen. It uses Hopsworks (project `gust_prediction`) as Feature Store and Model Registry and runs locally..
 
 ## Forecast task
 
