@@ -1,0 +1,21 @@
+[project]
+name = "wind-gust-forecasting-mlops"
+version = "0.1.0"
+description = "FTI MLOps system forecasting the max 1h wind gust at MeteoSwiss station BER"
+requires-python = "==3.12.*"
+dependencies = [
+    "hopsworks[python]==5.2.3",
+    "pandas==2.3.3",
+    "numpy==2.3.5",
+    "scikit-learn==1.9.1",
+    "joblib==1.6.0",
+    "requests==2.34.2",
+    "python-dotenv==1.2.4",
+    "pyarrow==25.0.0",
+    "pytest==9.2.0",
+    "hypothesis==6.170.15",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["src/tests"]
