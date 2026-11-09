@@ -75,7 +75,7 @@ def _stale_warnings(caplog) -> list[logging.LogRecord]:
 def test_staleness_warning_at_25_hours_still_forecasts(mock_env, caplog):
     mock_env(age_hours=25, constant=30.0)
     with caplog.at_level(logging.WARNING):
-        line = pipeline.run_inference(_SETTINGS)
+        line = pipeline.run_inference(_SETTINGS).line
     assert len(_stale_warnings(caplog)) == 1
     assert "forecast_max_gust_next_1h=30.0 km/h" in line
 
@@ -83,7 +83,7 @@ def test_staleness_warning_at_25_hours_still_forecasts(mock_env, caplog):
 def test_no_staleness_warning_at_23_hours_and_forecast_produced(mock_env, caplog):
     mock_env(age_hours=23, constant=30.0)
     with caplog.at_level(logging.WARNING):
-        line = pipeline.run_inference(_SETTINGS)
+        line = pipeline.run_inference(_SETTINGS).line
     assert _stale_warnings(caplog) == []
     assert "forecast_max_gust_next_1h=30.0 km/h" in line
 
@@ -113,16 +113,20 @@ def test_empty_or_unreachable_now_file_exits_nonzero_without_output(
     assert capsys.readouterr().out == ""
 
 
-def test_successful_run_prints_exactly_one_line_and_exits_zero(mock_env, monkeypatch, capsys):
+def test_successful_run_prints_report_with_result_line_and_exits_zero(mock_env, monkeypatch, capsys):
     mock_env(constant=30.0)
     monkeypatch.setattr(inference_main, "setup_logging", lambda *a, **k: None)
     monkeypatch.setattr(inference_main, "load_settings", lambda: _SETTINGS)
 
     assert inference_main.main() == 0
-    out_lines = capsys.readouterr().out.splitlines()
-    assert out_lines == [
+    out = capsys.readouterr().out
+    assert "Inputs used" in out
+    assert "Forecast vs context" in out
+    assert "GUST FORECAST" in out
+    assert "Total runtime" in out
+    assert out.splitlines()[-1] == (
         f"BER {_READING_TS.isoformat()} forecast_max_gust_next_1h=30.0 km/h"
-    ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -131,7 +135,7 @@ def test_successful_run_prints_exactly_one_line_and_exits_zero(mock_env, monkeyp
 )
 def test_forecast_is_rounded_to_one_decimal(mock_env, constant, expected):
     mock_env(constant=constant)
-    line = pipeline.run_inference(_SETTINGS)
+    line = pipeline.run_inference(_SETTINGS).line
     assert line.endswith(f"forecast_max_gust_next_1h={expected} km/h")
 
 

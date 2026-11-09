@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ import joblib
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-from src.common import config, hopsworks_io
+from src.common import config, hopsworks_io, report
 from src.common.config import EVENT_TIME, FEATURE_COLUMNS, LABEL_COLUMN, PRIMARY_KEY
 from src.common.features import validate_feature_columns
 from src.common.logging_utils import run_with_timeout, step
@@ -113,9 +114,81 @@ def _log_split(name: str, df: pd.DataFrame) -> None:
     )
 
 
+def _report_data(frame: pd.DataFrame, labeled: pd.DataFrame, dropped: int) -> None:
+    report.banner("TRAINING PIPELINE")
+    report.section("Data")
+    report.kv("Feature view", f"{config.FEATURE_VIEW_NAME} v{config.FEATURE_VIEW_VERSION}")
+    report.kv("Feature group", f"{config.FEATURE_GROUP_NAME} v{config.FEATURE_GROUP_VERSION}")
+    report.kv("Label", LABEL_COLUMN)
+    report.kv("Features used", f"{len(FEATURE_COLUMNS)}")
+    report.line("  aggregated: " + ", ".join(config.AGGREGATED_FEATURES))
+    report.line("  realtime:   " + ", ".join(config.REALTIME_FEATURES))
+    report.kv("Rows read", f"{len(frame):,}")
+    report.kv("  labeled", f"{len(labeled):,}")
+    report.kv("  unlabeled (dropped)", f"{dropped:,}")
+
+
+def _report_split(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    total = len(train_df) + len(test_df)
+    report.section("Split (time based, no shuffling)")
+    report.table(
+        ["set", "rows", "share", "from (UTC)", "to (UTC)"],
+        [
+            [
+                name,
+                f"{len(df):,}",
+                f"{100 * len(df) / total:.1f}%",
+                report.fmt_ts(df[EVENT_TIME].min()),
+                report.fmt_ts(df[EVENT_TIME].max()),
+            ]
+            for name, df in (("train", train_df), ("test", test_df))
+        ],
+        first_width=6,
+    )
+
+
+def _report_label_distribution(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    report.section(f"Label distribution ({LABEL_COLUMN}, km/h)")
+    rows = []
+    for name, df in (("train", train_df), ("test", test_df)):
+        y = df[LABEL_COLUMN]
+        rows.append(
+            [
+                name,
+                report.fmt_num(y.mean()),
+                report.fmt_num(y.std()),
+                report.fmt_num(y.median()),
+                report.fmt_num(y.quantile(0.95)),
+                report.fmt_num(y.max()),
+            ]
+        )
+    report.table(["set", "mean", "std", "median", "p95", "max"], rows, first_width=6)
+
+
+def _report_metrics(metrics: dict[str, float], n_test: int) -> None:
+    report.section("Metrics (test set, km/h)")
+    report.table(
+        ["metric", "value"],
+        [
+            ["RMSE (model)", f"{metrics['rmse']:.2f}"],
+            ["MAE (model)", f"{metrics['mae']:.2f}"],
+            ["RMSE (persistence)", f"{metrics['baseline_rmse']:.2f}"],
+        ],
+    )
+    base = metrics["baseline_rmse"]
+    if base > 0:
+        gain = 100 * (base - metrics["rmse"]) / base
+        verdict = "yes" if metrics["rmse"] < base else "no"
+        report.line()
+        report.kv("Improvement vs baseline", f"{gain:+.1f}% RMSE")
+        report.kv("Model beats baseline", verdict)
+    report.kv("Test rows", f"{n_test:,}")
+
+
 def run_training(settings: Settings, artifacts_dir: str | Path = ARTIFACTS_DIR) -> dict[str, float]:
     """Run the whole training pipeline. Raises on any failure. Returns the metrics."""
     artifacts_dir = Path(artifacts_dir)
+    started = time.monotonic()
 
     with step("login"):
         project = hopsworks_io.login(settings)
@@ -132,6 +205,7 @@ def run_training(settings: Settings, artifacts_dir: str | Path = ARTIFACTS_DIR) 
         labeled, dropped = drop_unlabeled(frame)
         info.records = len(labeled)
         logger.info("excluded %d unlabeled rows; %d labeled rows remain", dropped, len(labeled))
+        _report_data(frame, labeled, dropped)
 
     with step("validate_and_split") as info:
         validate_feature_columns(feature_columns_of(labeled))
@@ -144,6 +218,8 @@ def run_training(settings: Settings, artifacts_dir: str | Path = ARTIFACTS_DIR) 
         info.records = len(labeled)
         _log_split("train", train_df)
         _log_split("test", test_df)
+        _report_split(train_df, test_df)
+        _report_label_distribution(train_df, test_df)
 
     with step("training", records=len(train_df)):
         model = build_model()
@@ -160,6 +236,7 @@ def run_training(settings: Settings, artifacts_dir: str | Path = ARTIFACTS_DIR) 
             metrics["mae"],
             metrics["baseline_rmse"],
         )
+        _report_metrics(metrics, len(test_df))
 
     with step("save_model"):
         save_model_atomically(model, artifacts_dir / MODEL_FILE_NAME)
@@ -177,4 +254,7 @@ def run_training(settings: Settings, artifacts_dir: str | Path = ARTIFACTS_DIR) 
             config.MODEL_UPLOAD_TIMEOUT_S,
         )
 
+    report.banner("TRAINING PIPELINE: SUCCESS")
+    report.kv("Model", config.MODEL_NAME)
+    report.kv("Total runtime", report.fmt_duration(time.monotonic() - started))
     return metrics

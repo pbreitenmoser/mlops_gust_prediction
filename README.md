@@ -51,7 +51,7 @@ The Feature_Store holds the feature group `bern_wind_features` (v1) and the feat
 
 Code layout:
 
-- `src/common/`: shared code (constants in `config.py`, feature logic, MeteoSwiss access, Hopsworks access, metrics, logging)
+- `src/common/`: shared code (constants in `config.py`, feature logic, MeteoSwiss access, Hopsworks access, metrics, logging, terminal reports in `report.py`)
 - `src/feature_pipeline/`, `src/training_pipeline/`, `src/inference_pipeline/`: one folder per pipeline
 - `src/tests/`: tests that need no network and no credentials
 
@@ -155,6 +155,8 @@ uv run python -m src.feature_pipeline.main backfill
 
 Downloads the historical files for 2023 to 2025 and the recent file, computes features and labels, and writes all rows to the feature group (the recorded run inserted 202,393 rows from 2023-01-01T05:50Z to 2026-11-06T23:50Z).
 
+Terminal report: run header (mode, station, start time, feature group), cleaning and feature step (raw readings, dropped rows, labeled / unlabeled, missing values per raw column), quality summary (min / mean / max of key features and the label), write step (rows upserted, time range, duration) and a footer with the total runtime.
+
 ```bash
 uv run python -m src.feature_pipeline.main incremental
 ```
@@ -167,11 +169,13 @@ uv run python -m src.training_pipeline.main
 
 Reads the feature view, makes the time split, trains the model, logs RMSE, MAE and baseline RMSE, and registers a new model version in the Model Registry.
 
+Terminal report: data (feature view and group with versions, features used, rows read / labeled / dropped), split (rows, share and date range of train and test), label distribution (mean, std, median, p95, max per set), metrics (RMSE, MAE, baseline RMSE, improvement over the baseline) and a footer with the total runtime.
+
 ```bash
 uv run python -m src.inference_pipeline.main
 ```
 
-Loads the newest stored feature row, the latest live reading and the newest model version, and prints exactly one line, for example `BER 2026-11-07T12:40:00+00:00 forecast_max_gust_next_1h=9.7 km/h`.
+Loads the newest stored feature row, the latest live reading and the newest model version, and prints a report to stdout: the inputs used (model version, timestamps, all 16 feature values), the forecast compared with the current gust and the 1 h, 3 h and 6 h maximum gust, the total runtime, and a highlighted `GUST FORECAST` box. The last line is always the plain result line, for example `BER 2026-11-07T12:40:00+00:00 forecast_max_gust_next_1h=9.7 km/h`, so scripts can read it with `tail -n 1`. Log lines go to stderr. A failed run prints nothing to stdout.
 
 ```bash
 uv run pytest
@@ -197,7 +201,7 @@ Difficulties and how they were solved:
 
 - The `hopsworks` package needed the `[python]` extra (it brings the delta library) to write the feature group. The dependency is now `hopsworks[python]`.
 - Hopsworks returns the key and event-time columns with a prefixed name when they are not selected as features. The helper `_strip_key_prefix` restores the names `station` and `reference_timestamp`.
-- The Hopsworks client prints progress to stdout. The inference pipeline redirects it to stderr so that stdout has exactly one output line.
+- The Hopsworks client prints progress to stdout. The inference pipeline redirects it to stderr so that stdout only contains the report, and the result line stays the last line.
 
 ## Out of scope (version 1)
 

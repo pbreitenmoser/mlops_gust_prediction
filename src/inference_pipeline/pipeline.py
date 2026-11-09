@@ -1,7 +1,8 @@
 """Inference pipeline: forecast the max gust of the next hour at station BER.
 
-Prints exactly one line to stdout on success. Logs go to stderr. Every error
-raises before anything is printed, so a failing run produces no output.
+Prints a report to stdout on success (inputs, forecast vs context, runtime, a
+highlighted forecast box and the one-line result). Logs go to stderr. Every
+error raises before anything is printed, so a failing run produces no output.
 """
 
 from __future__ import annotations
@@ -10,14 +11,15 @@ import contextlib
 import json
 import logging
 import sys
-from datetime import datetime
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
 
-from src.common import config, hopsworks_io, meteoswiss
+from src.common import config, hopsworks_io, meteoswiss, report
 from src.common.features import (
     build_inference_row,
     compute_latest_aggregates,
@@ -144,8 +146,72 @@ def _find(model_dir: Path, name: str) -> Path:
     raise InferenceError(f"model artifact {name} not found in {model_dir}")
 
 
-def run_inference(settings: Settings) -> str:
-    """Run all steps and return the output line (nothing is printed here)."""
+@dataclass
+class InferenceResult:
+    """Everything the terminal report needs; nothing is printed while it is built."""
+
+    line: str
+    forecast: float
+    reference_time: pd.Timestamp
+    stored_time: pd.Timestamp
+    stored_age_hours: float
+    inputs: pd.Series  # the 16 model inputs in FEATURE_COLUMNS order
+    model_version: object = None
+
+
+def _signed(value: float) -> str:
+    return f"{value:+.1f}"
+
+
+def print_report(result: InferenceResult, runtime_s: float) -> None:
+    """Print inputs, forecast vs context, runtime and the highlighted forecast."""
+    x = result.inputs
+    report.banner("INFERENCE PIPELINE")
+    report.section("Inputs used")
+    report.kv("Station", config.STATION)
+    report.kv("Model", f"{config.MODEL_NAME} v{result.model_version}")
+    report.kv("Live reading (UTC)", report.fmt_ts(result.reference_time))
+    report.kv("Stored row (UTC)", f"{report.fmt_ts(result.stored_time)} ({result.stored_age_hours:.1f} h older)")
+    report.line()
+    report.line("Aggregated (from Feature Store):")
+    for c in config.AGGREGATED_FEATURES:
+        report.kv(f"  {c}", report.fmt_num(x[c]))
+    report.line("Realtime (from live reading):")
+    for c in config.REALTIME_FEATURES:
+        report.kv(f"  {c}", report.fmt_num(x[c], 3))
+
+    report.section("Forecast vs context (km/h)")
+    f = result.forecast
+    report.table(
+        ["reference", "value", "forecast diff"],
+        [
+            [name, report.fmt_num(x[c], 1), _signed(f - x[c]) if pd.notna(x[c]) else "n/a"]
+            for name, c in (
+                ("gust now", "gust_now"),
+                ("max gust last 1 h", "gust_max_1h"),
+                ("max gust last 3 h", "gust_max_3h"),
+                ("max gust last 6 h", "gust_max_6h"),
+            )
+        ],
+    )
+    report.line()
+    report.kv("Forecast max gust next 1 h", f"{f:.1f} km/h")
+    report.kv("Total runtime", report.fmt_duration(runtime_s))
+
+    report.highlight(
+        [
+            "GUST FORECAST",
+            "",
+            f"{config.STATION}  |  reference time {report.fmt_ts(result.reference_time)} UTC",
+            f"max gust in the next hour: {f:.1f} km/h",
+        ]
+    )
+    # Machine-readable line, unchanged format.
+    print(result.line, flush=True)
+
+
+def run_inference(settings: Settings) -> InferenceResult:
+    """Run all steps and return the result (nothing is printed here)."""
     with step("fetch_now_file"):
         try:
             now_df = meteoswiss.load_now()
@@ -194,12 +260,22 @@ def run_inference(settings: Settings) -> str:
         if not np.isfinite(forecast):
             raise InferenceError("model returned a non-finite forecast")
 
-    return format_output_line(config.STATION, reference_time, forecast)
+    return InferenceResult(
+        line=format_output_line(config.STATION, reference_time, forecast),
+        forecast=forecast,
+        reference_time=reference_time,
+        stored_time=pd.Timestamp(stored[config.EVENT_TIME]),
+        stored_age_hours=age,
+        inputs=row.iloc[0],
+        model_version=getattr(_model_info, "version", "?"),
+    )
 
 
 def run_pipeline_main(settings: Settings) -> None:
-    """Entry for run_pipeline: print one line only after everything succeeded."""
-    # Hopsworks client libraries print progress text to stdout; keep stdout to the forecast line only.
+    """Entry for run_pipeline: print the report only after everything succeeded."""
+    started = time.monotonic()
+    # Hopsworks client libraries print progress text to stdout; send it to stderr so
+    # stdout only carries the report (and stays empty when a run fails).
     with contextlib.redirect_stdout(sys.stderr):
-        line = run_inference(settings)
-    print(line, flush=True)
+        result = run_inference(settings)
+    print_report(result, time.monotonic() - started)
